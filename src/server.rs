@@ -43,13 +43,18 @@ pub async fn start_tcp_listener(cfg: Arc<ServerConfig>) -> Result<(), Error> {
         let cfg = cfg.clone();
         let server = server.clone();
         tokio::spawn(async move {
+            println!("[server] handshaking...");
             let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
+
             match acceptor.accept(conn).await {
-                Ok(tls_stream) => match handle(server, tls_stream).await {
-                    Ok(()) => {}
-                    Err(err) => eprintln!("{err}"),
-                },
-                Err(e) => eprintln!("{e}"),
+                Ok(tls_stream) => {
+                    println!("[server] handshake done");
+                    match handle(server, tls_stream).await {
+                        Ok(()) => {}
+                        Err(err) => println!("[server] {err}"),
+                    }
+                }
+                Err(e) => println!("[server] {e}"),
             }
         });
     }
@@ -67,7 +72,7 @@ macro_rules! err {
         match $expr {
             Ok(x) => x,
             Err(e) => {
-                eprintln!("[warn] {e}");
+                eprintln!("[server] [warn] {e}");
                 return;
             }
         }
@@ -76,7 +81,10 @@ macro_rules! err {
 
 async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Result<(), Error> {
     wait_for_body(&mut tls_stream).await?;
+    println!("[server] done waiting for body");
     let init_message = read_client_message(&mut tls_stream).await?;
+
+    println!("[server] got an init message {:?}", init_message);
 
     match init_message {
         ClientMessage::InitRx { new_session: _ } => {
@@ -101,11 +109,13 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                 Default::default();
 
             loop {
-                let Some(send_to_client_chan) = server.send_to_client.remove(&uuid) else { bail!("unknown uuid uuid")};
-
+                let Some(send_to_client_chan) = server.send_to_client.get(&uuid).map(|x| x.clone()) else { bail!("unknown uuid {uuid}")};
+                println!("[server] entering {uuid} tx loop");
                 let msg = read_client_message(&mut tls_stream).await?;
+                
                 match msg {
                     ClientMessage::NewConnectionWithIp { addr, id } => {
+                        println!("[server] got a message in tx channel {:?}", msg);
                         let send_to_client_chan = send_to_client_chan.clone();
                         let (tx, mut rx) = channel(10000);
                         connection_senders.insert(id, Arc::new(tx));
@@ -123,7 +133,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                                 match read.read(buff.as_mut_slice()).await {
                                     Ok(n) => {
                                         if n == 0 {
-                                            println!("n == 0");
+                                            println!("[server] n == 0");
                                             break;
                                         }
                                         let data = buff[0..n].to_vec(); // TODO: double check
@@ -131,7 +141,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                                         send_to_client_chan.send(msg).await.unwrap();
                                     }
                                     Err(e) => {
-                                        println!("err {:?}", e);
+                                        println!("[server] err {:?}", e);
                                         break;
                                     }
                                 };
@@ -139,6 +149,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                         });
                     }
                     ClientMessage::Data { id, data } => {
+                        println!("[server] got a message in tx channel Data");
                         let Some(tx) = connection_senders.get(&id).map(|x| x.clone()) else { bail!("no sender!") };
                         tx.send(data).await?;
                     }
@@ -154,7 +165,11 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
 async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<ClientMessage, Error> {
     assert!(bincode::serialized_size(&0u64)? == size_of::<u64>() as u64);
 
-    let len = stream.read_u64().await? as usize;
+    println!("[server] waiting for client message...");
+    let mut len_hdr = [0u8; 64 / 8];
+    stream.read_exact(&mut len_hdr).await?;
+    let len: usize = bincode::deserialize(len_hdr.as_slice())?;
+    println!("[server] got a client message with len {}", len);
     let mut buffer = vec![0u8; len];
 
     let n = stream.read_exact(&mut buffer).await?;
@@ -165,9 +180,12 @@ async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<Client
 }
 
 async fn wait_for_body(stream: &mut TlsStream<TcpStream>) -> Result<(), Error> {
+    // TODO: this won't work!
     let mut sep = [0u8; 4];
     loop {
         let n = stream.read_exact(&mut sep).await?;
+        // let joined: Vec<_> = sep.iter().cloned().map(char::from).collect();
+        // println!("{:?}", joined);
         match (n, sep) {
             (4, [b'\r', b'\n', b'\r', b'\n']) => break,
             (4, _) => {}
@@ -204,7 +222,7 @@ fn load_private_key(filename: &str) -> io::Result<rustls::PrivateKey> {
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
         .map_err(|_| error("failed to load private key".into()))?;
     if keys.len() != 1 {
-        println!("{:?}", keys);
+        println!("[server] {:?}", keys);
         return Err(error("expected a single private key".into()));
     }
 

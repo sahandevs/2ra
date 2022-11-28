@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 socks5-server = { path = "./socks5-server" }
 socks5-proto = "0.3.2"
-rustls =  "0.20.7"
+rustls =  { version = "0.20.7", features = ["dangerous_configuration"] }
 tokio = { version = "1.20.2", features = ["full"] }
 anyhow = "*"
 tokio-rustls = "*"
