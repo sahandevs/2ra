@@ -6,6 +6,24 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+socks5-server = { path = "./socks5-server" }
+socks5-proto = "0.3.2"
+rustls =  "0.20.7"
+tokio = { version = "1.20.2", features = ["full"] }
+anyhow = "*"
+tokio-rustls = "*"
+futures-util = "*"
+rustls-pemfile = "*"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+webpki-roots = "*"
+async-bincode = "*"
+chashmap = "2.2"
+[dependencies.uuid]
+version = "*"
+features = [
+    "v4",                # Lets you generate random UUIDs
+]
 
 
 [[bin]]
