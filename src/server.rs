@@ -223,7 +223,7 @@ async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<Client
     log::debug!("waiting for client message...");
     let mut len_hdr = [0u8; 64 / 8];
     stream.read_exact(&mut len_hdr).await?;
-    log::trace!("{:?}", len_hdr.iter().map(|x| *x as char).collect::<Vec<char>>());
+    // log::trace!("{:?}", len_hdr.iter().map(|x| *x as char).collect::<Vec<char>>());
     let len: usize = bincode::deserialize(len_hdr.as_slice())?;
 
     if len > 100_000 {
@@ -247,7 +247,7 @@ async fn wait_for_body(target: &[char], stream: &mut TlsStream<TcpStream>) -> Re
 
     loop {
         let x = stream.read_u8().await?;
-        log::trace!("{:?}", [x as char]);
+        // log::trace!("{:?}", [x as char]);
         if x as char == target[matched_idx] {
             matched_idx += 1;
         } else {

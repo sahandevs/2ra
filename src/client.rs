@@ -35,11 +35,16 @@ pub async fn start_client(config: ClientConfig) -> Result<()> {
     let server = Server::bind(config.inbound_addr.as_str(), Arc::new(NoAuth)).await?;
     log::info!("creating socks5 server done");
     log::info!("creating 2ra client ...");
-    let client = Arc::new(Client::new(config.clone()).await?);
-    client.restart().await;
-    log::info!("building client<->server connection done!");
+
+    let pool = vec![Arc::new(Client::new(config.clone()).await?); config.client_pool];
+    let mut next_client_idx = 0;
+
     while let Ok((conn, _)) = server.accept().await {
-        let client = client.clone();
+        let client = pool[next_client_idx].clone();
+        next_client_idx += 1;
+        if next_client_idx >= pool.len() {
+            next_client_idx = 0;
+        }
         tokio::spawn(async move {
             match handle(client, conn).await {
                 Ok(()) => {}
@@ -128,9 +133,9 @@ impl Client {
             next_conn_id: Default::default(),
             receiver_channels: Default::default(),
             config,
-            gate: Gate::new(false),
+            gate: Gate::new(true),
             kill_notification: Default::default(),
-            killing: AtomicBool::new(false),
+            killing: AtomicBool::new(true),
         })
     }
 
@@ -332,7 +337,7 @@ async fn wait_for_body(target: &[char], stream: &mut TlsStream<TcpStream>) -> Re
 
     loop {
         let x = stream.read_u8().await?;
-        log::trace!("{:?}", [x as char]);
+        // log::trace!("{:?}", [x as char]);
         if x as char == target[matched_idx] {
             matched_idx += 1;
         } else {

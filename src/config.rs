@@ -32,4 +32,6 @@ pub struct ClientConfig {
     pub outbound_addr: String,
 
     pub separator: Vec<char>,
+
+    pub client_pool: usize,
 }
