@@ -225,6 +225,11 @@ async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<Client
     stream.read_exact(&mut len_hdr).await?;
     log::trace!("{:?}", len_hdr.iter().map(|x| *x as char).collect::<Vec<char>>());
     let len: usize = bincode::deserialize(len_hdr.as_slice())?;
+
+    if len > 100_000 {
+        return Err(eyre!("invalid message len size. {len} is too big"));
+    }
+
     log::debug!("got a client message with len {}", len);
     let mut buffer = vec![0u8; len];
 

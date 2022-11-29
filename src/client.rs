@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize},
         Arc,
     },
+    time::Duration,
 };
 
 use color_eyre::{eyre::eyre, Result};
@@ -14,26 +15,18 @@ use tokio::{
     self,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc,
+    sync::{
+        mpsc::{self, channel},
+        Notify, RwLock,
+    },
 };
 use tokio_rustls::{client::TlsStream, TlsConnector};
 
 use crate::{
     config::ClientConfig,
+    gate::Gate,
     message::{ClientMessage, IntoMessage, ServerMessage},
 };
-
-macro_rules! err {
-    ($expr:expr) => {{
-        match $expr {
-            Ok(x) => x,
-            Err(e) => {
-                log::error!("[warn] {e}");
-                return;
-            }
-        }
-    }};
-}
 
 pub async fn start_client(config: ClientConfig) -> Result<()> {
     let config = Arc::new(config);
@@ -43,7 +36,7 @@ pub async fn start_client(config: ClientConfig) -> Result<()> {
     log::info!("creating socks5 server done");
     log::info!("creating 2ra client ...");
     let client = Arc::new(Client::new(config.clone()).await?);
-
+    client.restart().await;
     log::info!("building client<->server connection done!");
     while let Ok((conn, _)) = server.accept().await {
         let client = client.clone();
@@ -59,12 +52,19 @@ pub async fn start_client(config: ClientConfig) -> Result<()> {
 }
 
 struct Client {
-    tx: Arc<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    tx: RwLock<Arc<tokio::sync::mpsc::Sender<Vec<u8>>>>,
     config: Arc<ClientConfig>,
     next_conn_id: AtomicUsize,
 
-    receiver_channels: Arc<chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    receiver_channels: RwLock<Arc<chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
+
+    kill_notification: RwLock<Arc<tokio::sync::Notify>>,
+    killing: AtomicBool,
+
+    gate: Gate,
 }
+
+unsafe impl Sync for Client {}
 
 impl Client {
     #[track_caller]
@@ -121,18 +121,47 @@ impl Client {
     }
 
     pub async fn new(config: Arc<ClientConfig>) -> Result<Client> {
+        // stub tx channel
+        let (tx, _) = channel(10000);
+        Ok(Client {
+            tx: RwLock::new(Arc::new(tx)),
+            next_conn_id: Default::default(),
+            receiver_channels: Default::default(),
+            config,
+            gate: Gate::new(false),
+            kill_notification: Default::default(),
+            killing: AtomicBool::new(false),
+        })
+    }
+
+    pub async fn recreate_pipes(self: &Arc<Self>) -> Result<()> {
+        log::info!("creating pipes!");
+
+        self.killing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        {
+            let x = self.kill_notification.read().await.clone();
+            x.notify_waiters();
+        }
+
+        let new_kill_notification = Arc::new(Notify::new());
+
         let receiver_channels: Arc<chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<Vec<u8>>>> =
             Default::default();
         let receiver_channels_ref = receiver_channels.clone();
+
+        let mut tx_ref = self.tx.write().await;
+        let mut receiver_channels_mut_ref = self.receiver_channels.write().await;
+        let mut old_kill_notification_ref = self.kill_notification.write().await;
 
         log::info!("creating rx_stream");
         let (uuid, rx_stream) = {
             // connect to server and get a new uuid
             let mut stream = Self::create_connection(
-                &config.outbound_addr,
-                &config.rx_sni,
-                &config.http_request,
-                config.insecure_tls,
+                &self.config.outbound_addr,
+                &self.config.rx_sni,
+                &self.config.http_request,
+                self.config.insecure_tls,
             )
             .await?;
             log::trace!("connection made");
@@ -140,7 +169,7 @@ impl Client {
             let init_msg = ClientMessage::InitRx { new_session: true };
             stream.write_all(init_msg.as_message()?.as_slice()).await?;
             stream.flush().await?;
-            wait_for_body(&config.separator, &mut stream).await?;
+            wait_for_body(&self.config.separator, &mut stream).await?;
             log::debug!("waiting for stub response done");
             match read_server_message(&mut stream).await? {
                 ServerMessage::SessionCreated { uuid } => (uuid, stream),
@@ -149,20 +178,41 @@ impl Client {
         };
         log::info!("rx_stream created");
 
+        let client_ref = self.clone();
+        let new_kill_notification_ref = new_kill_notification.clone();
+
+        self.killing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
         tokio::spawn(async move {
             let mut rx_stream = rx_stream;
             loop {
-                let msg = match read_server_message(&mut rx_stream).await {
+                let msg = match tokio::select! {
+                    _ = new_kill_notification_ref.notified() => {
+                        log::info!("killing rx_stream...");
+                        return;
+                    },
+                    x = read_server_message(&mut rx_stream) => x,
+                } {
                     Ok(x) => x,
                     Err(e) => {
                         log::error!("hit error while reading server message {:?}", e);
-                        continue;
+                        client_ref
+                            .killing
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
                     }
                 };
 
                 match msg {
                     ServerMessage::Data { id, data } => {
                         if let Some(chan) = receiver_channels.get(&id) {
+                            if client_ref
+                                .killing
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                return;
+                            }
                             if let Err(e) = chan.send(data).await {
                                 log::error!("x -> {}", e);
                             }
@@ -179,10 +229,10 @@ impl Client {
         let mut tx_stream = {
             // connect to server and init tx
             let mut stream = Self::create_connection(
-                &config.outbound_addr,
-                &config.tx_sni,
-                &config.http_request,
-                config.insecure_tls,
+                &self.config.outbound_addr,
+                &self.config.tx_sni,
+                &self.config.http_request,
+                self.config.insecure_tls,
             )
             .await?;
 
@@ -194,22 +244,53 @@ impl Client {
 
         let (tx, mut chan_rx) = mpsc::channel::<Vec<u8>>(10000);
 
+        let client_ref = self.clone();
+        let new_kill_notification_ref = new_kill_notification.clone();
         tokio::spawn(async move {
-            while let Some(x) = chan_rx.recv().await {
-                if let Err(e) = tx_stream.write_all(&x).await {
-                    log::error!("{:?}", e)
+            while let Some(x) = tokio::select! {
+                _ = new_kill_notification_ref.notified() => {
+                    log::info!("killing tx_stream...");
+                    return;
+                },
+                x = chan_rx.recv() => x,
+            } {
+                if let Err(e) = tokio::select! {
+                _ = new_kill_notification_ref.notified() => {
+                    log::info!("killing tx_stream...");
+                    return;
+                },
+                x =  tx_stream.write_all(&x) => x, }
+                {
+                    log::error!("{:?}", e);
+                    client_ref
+                        .killing
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
                 }
                 let _ = tx_stream.flush().await;
             }
         });
         log::info!("tx_stream created");
 
-        Ok(Client {
-            tx: Arc::new(tx),
-            next_conn_id: Default::default(),
-            receiver_channels: receiver_channels_ref,
-            config,
-        })
+        *tx_ref = Arc::new(tx);
+
+        *receiver_channels_mut_ref = receiver_channels_ref;
+        *old_kill_notification_ref = new_kill_notification;
+        drop(tx_ref);
+        drop(receiver_channels_mut_ref);
+
+        Ok(())
+    }
+
+    pub async fn restart(self: &Arc<Self>) {
+        log::info!("restarting pipes...");
+        self.gate.set_open(false);
+        while let Err(e) = self.recreate_pipes().await {
+            log::error!("failed to create pipes... {e}");
+            log::info!("retrying in 5 seconds...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        self.gate.set_open(true);
     }
 
     pub async fn create_new_connection(
@@ -222,7 +303,7 @@ impl Client {
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(10000);
 
-        if self.receiver_channels.insert(id, tx).is_some() {
+        if self.receiver_channels.read().await.insert(id, tx).is_some() {
             log::warn!("id collided!");
         }
 
@@ -233,8 +314,15 @@ impl Client {
             }
         };
 
-        self.tx.send(msg.as_message()?).await?;
+        self.tx.read().await.send(msg.as_message()?).await?;
         Ok((rx, id))
+    }
+
+    pub async fn send_data(&self, id: usize, data: Vec<u8>) -> Result<()> {
+        let msg = ClientMessage::Data { id, data };
+        let tx = self.tx.read().await;
+        tx.send(msg.as_message()?).await?;
+        Ok(())
     }
 }
 
@@ -264,6 +352,11 @@ async fn read_server_message(stream: &mut TlsStream<TcpStream>) -> Result<Server
     let mut len_hdr = [0u8; 64 / 8];
     stream.read_exact(&mut len_hdr).await?;
     let len: usize = bincode::deserialize(len_hdr.as_slice())?;
+
+    if len > 100_000 {
+        return Err(eyre!("invalid message len size. {len} is too big"));
+    }
+
     log::debug!("got a server message with len {}", len);
     let mut buffer = vec![0u8; len];
 
@@ -275,6 +368,14 @@ async fn read_server_message(stream: &mut TlsStream<TcpStream>) -> Result<Server
 }
 
 async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
+    client.gate.wait_or_pass().await;
+    if client
+        .killing
+        .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        client.restart().await;
+    }
+
     log::debug!("new socks5 conn");
     match conn.handshake().await? {
         Connection::Associate(associate, _) => {
@@ -298,8 +399,10 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
             let broken_pipe = Arc::new(AtomicBool::new(false));
 
             let bp = broken_pipe.clone();
+
+            let client_ref = client.clone();
             let read_task = tokio::task::spawn(async move {
-                let mut buff = vec![0u8; client.config.buffer_size];
+                let mut buff = vec![0u8; client_ref.config.buffer_size];
                 loop {
                     if bp.load(std::sync::atomic::Ordering::Relaxed) {
                         return;
@@ -311,12 +414,10 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
                                 break;
                             }
                             let data = buff[0..n].to_vec(); // TODO: double check
-                            let msg = ClientMessage::Data { id, data };
-                            if bp.load(std::sync::atomic::Ordering::Relaxed) {
-                                return;
-                            }
-                            if client.tx.send(err!(msg.as_message())).await.is_err() {
+                            if let Err(e) = client_ref.send_data(id, data).await {
+                                log::error!("error while sending data to server {e}");
                                 bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return;
                             }
                         }
                         Err(e) => {
@@ -336,11 +437,22 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
                     let _ = socks_write.flush().await;
                 }
             });
+            let kill_notification = client.kill_notification.read().await.clone();
 
-            let (a, b) = tokio::join!(read_task, write_task);
-            a?;
-            b?;
-            log::debug!("socks5 job done");
+            tokio::select! {
+                _ = kill_notification.notified() => {
+                    broken_pipe.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    return Err(eyre!("kill notification received while handling socks5 connection"));
+                },
+                x = async { tokio::join!(read_task, write_task) } => {
+                    x.0?;
+                    x.1?;
+
+                    log::debug!("socks5 job done");
+                    return Ok(());
+                }
+            };
         }
     }
 
