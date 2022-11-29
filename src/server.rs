@@ -77,7 +77,7 @@ macro_rules! err {
             Ok(x) => x,
             Err(e) => {
                 log::error!("[warn] {e}");
-                return;
+                return Err(eyre!("[warn] {e}"));
             }
         }
     }};
@@ -119,39 +119,25 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                 let msg = read_client_message(&mut tls_stream).await?;
 
                 match msg {
+                    ClientMessage::NewConnectionWithDomain { domain, port, id } => {
+                        log::debug!("got a message in tx channel NewConnectionWithDomain");
+                        handle_new_connection_with_addr(
+                            ClientMessage::NewConnectionWithDomain { domain, port, id },
+                            send_to_client_chan,
+                            &connection_senders,
+                            id,
+                        )
+                        .await?;
+                    }
                     ClientMessage::NewConnectionWithIp { addr, id } => {
                         log::debug!("got a message in tx channel {:?}", msg);
-                        let send_to_client_chan = send_to_client_chan.clone();
-                        let (tx, mut rx) = channel(10000);
-                        connection_senders.insert(id, Arc::new(tx));
-                        tokio::task::spawn(async move {
-                            let conn = err!(tokio::net::TcpStream::connect(addr).await);
-                            let (mut read, mut write) = conn.into_split();
-                            tokio::task::spawn(async move {
-                                while let Some(data) = rx.recv().await {
-                                    err!(write.write_all(data.as_slice()).await);
-                                    err!(write.flush().await);
-                                }
-                            });
-                            let mut buff = [0u8; 1024];
-                            loop {
-                                match read.read(buff.as_mut_slice()).await {
-                                    Ok(n) => {
-                                        if n == 0 {
-                                            log::debug!("n == 0");
-                                            break;
-                                        }
-                                        let data = buff[0..n].to_vec(); // TODO: double check
-                                        let msg = ServerMessage::Data { id, data };
-                                        send_to_client_chan.send(msg).await.unwrap();
-                                    }
-                                    Err(e) => {
-                                        log::error!("err {:?}", e);
-                                        break;
-                                    }
-                                };
-                            }
-                        });
+                        handle_new_connection_with_addr(
+                            ClientMessage::NewConnectionWithIp { addr, id },
+                            send_to_client_chan,
+                            &connection_senders,
+                            id,
+                        )
+                        .await?;
                     }
                     ClientMessage::Data { id, data } => {
                         log::debug!("got a message in tx channel Data");
@@ -164,6 +150,70 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
         }
         x => return Err(eyre!("invalid first message: {:?}", x)),
     };
+    Ok(())
+}
+
+async fn handle_new_connection_with_addr(
+    msg: ClientMessage,
+    send_to_client_chan: Arc<Sender<ServerMessage>>,
+    connection_senders: &chashmap::CHashMap<usize, Arc<Sender<Vec<u8>>>>,
+    id: usize,
+) -> Result<()> {
+    let send_to_client_chan = send_to_client_chan.clone();
+    let (tx, mut rx) = channel(10000);
+    connection_senders.insert(id, Arc::new(tx));
+    tokio::task::spawn(async move {
+        let addr = match msg {
+            ClientMessage::NewConnectionWithIp { addr, id: _ } => addr,
+            ClientMessage::NewConnectionWithDomain {
+                domain,
+                port,
+                id: _,
+            } => {
+                log::debug!("resolving {}:{}...", domain, port);
+                let addrs = tokio::net::lookup_host(format!("{}:{}", domain, port))
+                    .await?
+                    .into_iter()
+                    .next();
+                let Some(addr) = addrs else { return Err(eyre!("failed to lookup {}:{}", domain, port) );};
+                log::debug!("resolving {}:{} done", domain, port);
+
+                addr
+            }
+            _ => {
+                unreachable!("unreachable");
+            }
+        };
+        let conn = err!(tokio::net::TcpStream::connect(addr).await);
+        let (mut read, mut write) = conn.into_split();
+        tokio::task::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                err!(write.write_all(data.as_slice()).await);
+                err!(write.flush().await);
+            }
+            Ok(())
+        });
+        let mut buff = [0u8; 1024];
+        loop {
+            match read.read(buff.as_mut_slice()).await {
+                Ok(n) => {
+                    if n == 0 {
+                        log::debug!("n == 0");
+                        break;
+                    }
+                    let data = buff[0..n].to_vec(); // TODO: double check
+                    let msg = ServerMessage::Data { id, data };
+                    send_to_client_chan.send(msg).await.unwrap();
+                }
+                Err(e) => {
+                    log::error!("err {:?}", e);
+                    break;
+                }
+            };
+        }
+
+        Ok(())
+    });
     Ok(())
 }
 

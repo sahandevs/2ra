@@ -1,15 +1,31 @@
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
-    InitRx { new_session: bool },
-    InitTx { uuid: String },
-    NewConnectionWithIp { addr: SocketAddr, id: usize },
-    NewConnectionWithDomain { ip: IpAddr, port: u16, id: usize },
-    Data { id: usize, data: Vec<u8> },
-    CloseConnection { id: usize },
+    InitRx {
+        new_session: bool,
+    },
+    InitTx {
+        uuid: String,
+    },
+    NewConnectionWithIp {
+        addr: SocketAddr,
+        id: usize,
+    },
+    NewConnectionWithDomain {
+        domain: String,
+        port: u16,
+        id: usize,
+    },
+    Data {
+        id: usize,
+        data: Vec<u8>,
+    },
+    CloseConnection {
+        id: usize,
+    },
     Heartbeat,
 }
 

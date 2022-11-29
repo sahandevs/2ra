@@ -1,6 +1,5 @@
 use std::{
     mem::size_of,
-    net::{SocketAddrV4, SocketAddrV6},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -225,13 +224,9 @@ impl Client {
 
         let msg = match addr {
             Address::SocketAddress(addr) => ClientMessage::NewConnectionWithIp { addr, id },
-            Address::DomainAddress(addr, port) => {
-                // TODO: temporary resolve the addr locally
-                let result = tokio::net::lookup_host(format!("{}:{}", addr, port)).await?;
-                let addr = result.into_iter().next().unwrap();
-
-                ClientMessage::NewConnectionWithIp { addr, id }
-            } // x => Err(eyre!("{:?} not supported", x))?,
+            Address::DomainAddress(domain, port) => {
+                ClientMessage::NewConnectionWithDomain { domain, port, id }
+            }
         };
 
         self.tx.send(msg.as_message()?).await?;
