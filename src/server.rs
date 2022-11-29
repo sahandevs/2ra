@@ -1,4 +1,4 @@
-use anyhow::{bail, Error};
+use color_eyre::{eyre::eyre, Result};
 use std::mem::size_of;
 use std::sync::Arc;
 use std::vec::Vec;
@@ -6,55 +6,59 @@ use std::{fs, io, sync};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Sender};
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
 
+use crate::config::ServerConfig;
 use crate::message::{ClientMessage, IntoMessage, ServerMessage};
 
-pub async fn start_server() -> Result<(), Error> {
+pub async fn start_server(config: ServerConfig) -> Result<()> {
     // Build TLS configuration.
     let tls_cfg = {
         // Load public certificate.
-        let certs = load_certs("cert/cert.pem")?;
+        let certs = load_certs(&config.cert_pem_path)?;
         // Load private key.
-        let key = load_private_key("cert/key.pem")?;
+        let key = load_private_key(&config.key_pem_path)?;
         // Do not use client certificate authentication.
         let mut cfg = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|e| Error::msg(format!("{}", e)))?;
+            .map_err(|e| eyre!("{}", e))?;
         // Configure ALPN to accept HTTP/2, HTTP/1.1 in that order.
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        cfg.alpn_protocols = vec![b"http/1.0".to_vec()];
         sync::Arc::new(cfg)
     };
 
-    start_tcp_listener(tls_cfg).await?;
+    start_tcp_listener(config, tls_cfg).await?;
 
     Ok(())
 }
 
-pub async fn start_tcp_listener(cfg: Arc<ServerConfig>) -> Result<(), Error> {
-    let addr = "127.0.0.1:4433";
-
-    let server_listener = tokio::net::TcpListener::bind(addr).await?;
-    let server = Arc::new(Server::default());
+pub async fn start_tcp_listener(
+    config: ServerConfig,
+    cfg: Arc<rustls::ServerConfig>,
+) -> Result<()> {
+    let server_listener = tokio::net::TcpListener::bind(&config.inbound_addr).await?;
+    let server = Arc::new(Server {
+        send_to_client: Default::default(),
+        config,
+    });
     while let Ok((conn, _)) = server_listener.accept().await {
         let cfg = cfg.clone();
         let server = server.clone();
         tokio::spawn(async move {
-            println!("[server] handshaking...");
+            log::info!("handshaking...");
             let acceptor = tokio_rustls::TlsAcceptor::from(cfg);
 
             match acceptor.accept(conn).await {
                 Ok(tls_stream) => {
-                    println!("[server] handshake done");
+                    log::info!("handshake done");
                     match handle(server, tls_stream).await {
                         Ok(()) => {}
-                        Err(err) => println!("[server] {err}"),
+                        Err(err) => log::error!("{err}"),
                     }
                 }
-                Err(e) => println!("[server] {e}"),
+                Err(e) => log::error!("{e}"),
             }
         });
     }
@@ -62,9 +66,9 @@ pub async fn start_tcp_listener(cfg: Arc<ServerConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Default)]
 pub struct Server {
     send_to_client: chashmap::CHashMap<String, Arc<Sender<ServerMessage>>>,
+    config: ServerConfig,
 }
 
 macro_rules! err {
@@ -72,19 +76,19 @@ macro_rules! err {
         match $expr {
             Ok(x) => x,
             Err(e) => {
-                eprintln!("[server] [warn] {e}");
+                log::error!("[warn] {e}");
                 return;
             }
         }
     }};
 }
 
-async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Result<(), Error> {
-    wait_for_body(&mut tls_stream).await?;
-    println!("[server] done waiting for body");
+async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Result<()> {
+    wait_for_body(&server.config.separator, &mut tls_stream).await?;
+    log::debug!("done waiting for body");
     let init_message = read_client_message(&mut tls_stream).await?;
 
-    println!("[server] got an init message {:?}", init_message);
+    log::debug!("got an init message {:?}", init_message);
 
     match init_message {
         ClientMessage::InitRx { new_session: _ } => {
@@ -93,8 +97,9 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
             let (tx, mut rx) = channel(10000);
             server.send_to_client.insert(uuid.clone(), Arc::new(tx));
 
-            let content = "HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n\r\n".to_string();
-            tls_stream.write_all(content.as_bytes()).await?;
+            tls_stream
+                .write_all(server.config.http_response.as_bytes())
+                .await?;
             let m = ServerMessage::SessionCreated { uuid };
             tls_stream.write_all(m.as_message()?.as_slice()).await?;
             tls_stream.flush().await?;
@@ -109,13 +114,13 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                 Default::default();
 
             loop {
-                let Some(send_to_client_chan) = server.send_to_client.get(&uuid).map(|x| x.clone()) else { bail!("unknown uuid {uuid}")};
-                println!("[server] entering {uuid} tx loop");
+                let Some(send_to_client_chan) = server.send_to_client.get(&uuid).map(|x| x.clone()) else { return Err(eyre!("unknown uuid {uuid}"));};
+                log::debug!("entering {uuid} tx loop");
                 let msg = read_client_message(&mut tls_stream).await?;
-                
+
                 match msg {
                     ClientMessage::NewConnectionWithIp { addr, id } => {
-                        println!("[server] got a message in tx channel {:?}", msg);
+                        log::debug!("got a message in tx channel {:?}", msg);
                         let send_to_client_chan = send_to_client_chan.clone();
                         let (tx, mut rx) = channel(10000);
                         connection_senders.insert(id, Arc::new(tx));
@@ -133,7 +138,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                                 match read.read(buff.as_mut_slice()).await {
                                     Ok(n) => {
                                         if n == 0 {
-                                            println!("[server] n == 0");
+                                            log::debug!("n == 0");
                                             break;
                                         }
                                         let data = buff[0..n].to_vec(); // TODO: double check
@@ -141,7 +146,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                                         send_to_client_chan.send(msg).await.unwrap();
                                     }
                                     Err(e) => {
-                                        println!("[server] err {:?}", e);
+                                        log::error!("err {:?}", e);
                                         break;
                                     }
                                 };
@@ -149,47 +154,49 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                         });
                     }
                     ClientMessage::Data { id, data } => {
-                        println!("[server] got a message in tx channel Data");
-                        let Some(tx) = connection_senders.get(&id).map(|x| x.clone()) else { bail!("no sender!") };
+                        log::debug!("got a message in tx channel Data");
+                        let Some(tx) = connection_senders.get(&id).map(|x| x.clone()) else { return Err(eyre!("no sender!")); };
                         tx.send(data).await?;
                     }
-                    x => bail!("unexpected message {:?}", x),
+                    x => return Err(eyre!("unexpected message {:?}", x)),
                 }
             }
         }
-        x => bail!("invalid first message: {:?}", x),
+        x => return Err(eyre!("invalid first message: {:?}", x)),
     };
     Ok(())
 }
 
-async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<ClientMessage, Error> {
+async fn read_client_message(stream: &mut TlsStream<TcpStream>) -> Result<ClientMessage> {
     assert!(bincode::serialized_size(&0u64)? == size_of::<u64>() as u64);
 
-    println!("[server] waiting for client message...");
+    log::debug!("waiting for client message...");
     let mut len_hdr = [0u8; 64 / 8];
     stream.read_exact(&mut len_hdr).await?;
     let len: usize = bincode::deserialize(len_hdr.as_slice())?;
-    println!("[server] got a client message with len {}", len);
+    log::debug!("got a client message with len {}", len);
     let mut buffer = vec![0u8; len];
 
     let n = stream.read_exact(&mut buffer).await?;
     if n != len {
-        bail!("n != len");
+        return Err(eyre!("n != len"));
     }
     Ok(bincode::deserialize(&buffer)?)
 }
 
-async fn wait_for_body(stream: &mut TlsStream<TcpStream>) -> Result<(), Error> {
-    // TODO: this won't work!
-    let mut sep = [0u8; 4];
+async fn wait_for_body(target: &[char], stream: &mut TlsStream<TcpStream>) -> Result<()> {
+    log::debug!("waiting for stub request message");
+
+    let mut matched_idx = 0;
+
     loop {
-        let n = stream.read_exact(&mut sep).await?;
-        // let joined: Vec<_> = sep.iter().cloned().map(char::from).collect();
-        // println!("{:?}", joined);
-        match (n, sep) {
-            (4, [b'\r', b'\n', b'\r', b'\n']) => break,
-            (4, _) => {}
-            _ => bail!("!"),
+        let x = stream.read_u8().await?;
+        if x as char == target[matched_idx] {
+            matched_idx += 1;
+        }
+
+        if matched_idx >= target.len() {
+            break;
         }
     }
     Ok(())
@@ -222,7 +229,7 @@ fn load_private_key(filename: &str) -> io::Result<rustls::PrivateKey> {
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
         .map_err(|_| error("failed to load private key".into()))?;
     if keys.len() != 1 {
-        println!("[server] {:?}", keys);
+        log::error!("{:?}", keys);
         return Err(error("expected a single private key".into()));
     }
 

@@ -1,5 +1,6 @@
+use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}};
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
@@ -21,11 +22,11 @@ pub enum ServerMessage {
 }
 
 pub trait IntoMessage {
-    fn as_message(&self) -> Result<Vec<u8>, anyhow::Error>;
+    fn as_message(&self) -> Result<Vec<u8>>;
 }
 
 impl IntoMessage for ClientMessage {
-    fn as_message(&self) -> Result<Vec<u8>, anyhow::Error> {
+    fn as_message(&self) -> Result<Vec<u8>> {
         // TODO: avoid reallocation
         let data = bincode::serialize(self)?;
         let mut result: Vec<u8> = vec![];
@@ -37,7 +38,7 @@ impl IntoMessage for ClientMessage {
 }
 
 impl IntoMessage for ServerMessage {
-    fn as_message(&self) -> Result<Vec<u8>, anyhow::Error> {
+    fn as_message(&self) -> Result<Vec<u8>> {
         // TODO: avoid reallocation
         let data = bincode::serialize(self)?;
         let mut result: Vec<u8> = vec![];
