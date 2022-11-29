@@ -1,6 +1,9 @@
 use std::{
     mem::size_of,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize},
+        Arc,
+    },
 };
 
 use color_eyre::{eyre::eyre, Result};
@@ -132,6 +135,7 @@ impl Client {
                 config.insecure_tls,
             )
             .await?;
+            log::trace!("connection made");
 
             let init_msg = ClientMessage::InitRx { new_session: true };
             stream.write_all(init_msg.as_message()?.as_slice()).await?;
@@ -160,7 +164,7 @@ impl Client {
                     ServerMessage::Data { id, data } => {
                         if let Some(chan) = receiver_channels.get(&id) {
                             if let Err(e) = chan.send(data).await {
-                                log::error!("{}", e);
+                                log::error!("x -> {}", e);
                             }
                         } else {
                             log::error!("no channel listening for {}", id);
@@ -240,8 +244,11 @@ async fn wait_for_body(target: &[char], stream: &mut TlsStream<TcpStream>) -> Re
 
     loop {
         let x = stream.read_u8().await?;
+        log::trace!("{:?}", [x as char]);
         if x as char == target[matched_idx] {
             matched_idx += 1;
+        } else {
+            matched_idx = 0;
         }
 
         if matched_idx >= target.len() {
@@ -288,10 +295,15 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
                 .reply(Reply::Succeeded, Address::unspecified())
                 .await?;
             let (mut socks_read, mut socks_write) = conn.stream.into_split();
+            let broken_pipe = Arc::new(AtomicBool::new(false));
 
+            let bp = broken_pipe.clone();
             let read_task = tokio::task::spawn(async move {
                 let mut buff = vec![0u8; client.config.buffer_size];
                 loop {
+                    if bp.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     match socks_read.read(buff.as_mut_slice()).await {
                         Ok(n) => {
                             if n == 0 {
@@ -300,7 +312,12 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
                             }
                             let data = buff[0..n].to_vec(); // TODO: double check
                             let msg = ClientMessage::Data { id, data };
-                            client.tx.send(msg.as_message().unwrap()).await.unwrap();
+                            if bp.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
+                            if client.tx.send(err!(msg.as_message())).await.is_err() {
+                                bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                         Err(e) => {
                             log::error!("err {:?}", e);
@@ -310,10 +327,13 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
                 }
             });
 
+            let bp = broken_pipe.clone();
             let write_task = tokio::task::spawn(async move {
                 while let Some(data) = proxy_server_stream.recv().await {
-                    err!(socks_write.write_all(data.as_slice()).await);
-                    err!(socks_write.flush().await);
+                    if socks_write.write_all(data.as_slice()).await.is_err() {
+                        bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let _ = socks_write.flush().await;
                 }
             });
 

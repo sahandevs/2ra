@@ -1,23 +1,25 @@
 [client]
 http_request = """
 POST / HTTP/1.0
-Host: example.org
+Host: fronted-domain.com
+Content-Length: 99999999999999999
 X-2ra-version: <VER>
 """
 buffer_size = 1024
-tx_sni = "site1.com"
-rx_sni = "site.com"
+tx_sni = "tx.com"
+rx_sni = "rx.com"
 insecure_tls = true
 # socks5 addr
 inbound_addr = "127.0.0.1:5123"
 # 2ra server addr
-outbound_addr = "127.0.0.1:4433"
+outbound_addr = "127.0.0.1:443"
 separator = ["\r", "\n", "\r", "\n"]
 
-[server]
+[server-disable]
 http_response = """
-HTTP/1.1 200 OK
-X-2ra-version: <VER>
+HTTP/1.0 200 OK
+Content-Type: text/html; charset=UTF-8
+Server: gws
 """
 buffer_size = 1024
 inbound_addr = "127.0.0.1:4433"
