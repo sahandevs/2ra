@@ -1,5 +1,6 @@
 use std::{
     mem::size_of,
+    net::{SocketAddrV4, SocketAddrV6},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -19,6 +20,18 @@ use crate::{
     config::ClientConfig,
     message::{ClientMessage, IntoMessage, ServerMessage},
 };
+
+macro_rules! err {
+    ($expr:expr) => {{
+        match $expr {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("[warn] {e}");
+                return;
+            }
+        }
+    }};
+}
 
 pub async fn start_client(config: ClientConfig) -> Result<()> {
     let config = Arc::new(config);
@@ -212,7 +225,13 @@ impl Client {
 
         let msg = match addr {
             Address::SocketAddress(addr) => ClientMessage::NewConnectionWithIp { addr, id },
-            x => Err(eyre!("{:?} not supported", x))?,
+            Address::DomainAddress(addr, port) => {
+                // TODO: temporary resolve the addr locally
+                let result = tokio::net::lookup_host(format!("{}:{}", addr, port)).await?;
+                let addr = result.into_iter().next().unwrap();
+
+                ClientMessage::NewConnectionWithIp { addr, id }
+            } // x => Err(eyre!("{:?} not supported", x))?,
         };
 
         self.tx.send(msg.as_message()?).await?;
@@ -298,8 +317,8 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
 
             let write_task = tokio::task::spawn(async move {
                 while let Some(data) = proxy_server_stream.recv().await {
-                    socks_write.write_all(data.as_slice()).await.unwrap();
-                    socks_write.flush().await.unwrap();
+                    err!(socks_write.write_all(data.as_slice()).await);
+                    err!(socks_write.flush().await);
                 }
             });
 
