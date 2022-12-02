@@ -49,7 +49,7 @@ class _MyHomePageState extends State<MyHomePage> {
         'lib2raproto.so');
     
     final int Function() nativeAdd = nativeAddLib
-        .lookup<NativeFunction<Int32 Function()>>('lib2ra_test')
+        .lookup<NativeFunction<Int32 Function()>>('lib2ra_start_test_server')
         .asFunction();
     setState(() {
       result = nativeAdd();
