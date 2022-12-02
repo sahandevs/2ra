@@ -24,6 +24,9 @@ uuid = { version = "*", features = ["v4"] }
 pretty_env_logger = "*"
 log = "*"
 
+[lib]
+name         = "2raproto"
+crate-type   = ["cdylib"]
 
 [[bin]]
 name = "2ra"

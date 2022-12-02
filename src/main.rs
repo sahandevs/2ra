@@ -1,23 +1,15 @@
-use std::{env::args, time::Duration};
+use std::env::args;
 
-use lib2ra::{client::start_client, config, server::start_server};
 use tokio::fs::read_to_string;
 
-macro_rules! err {
-    ($expr:expr) => {{
-        match $expr {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!(
-                    "[warn] {e} in {} {}",
-                    stringify!($expr),
-                    core::panic::Location::caller()
-                );
-                return;
-            }
-        }
-    }};
-}
+
+mod start;
+
+pub mod client;
+pub mod config;
+pub mod gate;
+pub mod message;
+pub mod server;
 
 #[tokio::main]
 async fn main() {
@@ -37,27 +29,7 @@ async fn main() {
         }
     };
     let config = read_to_string(config).await.unwrap();
-    let mut config: config::Config = toml::de::from_str(&config).unwrap();
-
-    let mut tasks = vec![];
-
-    if let Some(mut server_config) = config.server.take() {
-        server_config.http_response = server_config.http_response.trim().to_string();
-        server_config.http_response.push_str("\r\n\r\n");
-        let task = tokio::task::spawn(async { err!(start_server(server_config).await) });
-        tasks.push(task);
-    }
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    if let Some(mut client_config) = config.client.take() {
-        client_config.http_request = client_config.http_request.trim().to_string();
-        client_config.http_request.push_str("\r\n\r\n");
-        let task = tokio::task::spawn(async { err!(start_client(client_config).await) });
-
-        tasks.push(task);
-    }
-
-    for task in tasks {
-        task.await.unwrap();
-    }
+    let config: config::Config = toml::de::from_str(&config).unwrap();
+    
+    start::start(config).await;
 }
