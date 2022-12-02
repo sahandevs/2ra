@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 import 'dart:ffi'; // For FFI
 import 'dart:io';
 
-import 'package:flutter/services.dart'; // For Platform.isX
+import 'package:flutter/services.dart';
+import 'package:system_info2/system_info2.dart'; // For Platform.isX
 
 void main() {
   runApp(const MyApp());
@@ -39,11 +40,14 @@ class _MyHomePageState extends State<MyHomePage> {
 
   void _reloadLib() async {
     final manifestContent = await rootBundle.loadString('AssetManifest.json');
+    print(SysInfo.kernelArchitecture);
 
     final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+
+    manifestMap.forEach((key, value) {print("${key}:${value}");});
     final DynamicLibrary nativeAddLib = DynamicLibrary.open(
-        '../target/release/lib2raproto.so');
-  
+        'lib2raproto.so');
+    
     final int Function() nativeAdd = nativeAddLib
         .lookup<NativeFunction<Int32 Function()>>('lib2ra_test')
         .asFunction();
@@ -87,7 +91,7 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
             Text(
-              'result: ${result}',
+              'result: ${result}. Hello from lib2ra!',
             ),
           ],
         ),
