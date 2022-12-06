@@ -1,11 +1,15 @@
 import 'dart:convert';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'dart:ffi'; // For FFI
 import 'dart:io';
 
 import 'package:flutter/services.dart';
-import 'package:system_info2/system_info2.dart'; // For Platform.isX
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:system_info2/system_info2.dart';
+
+import 'bridge.dart'; // For Platform.isX
 
 void main() {
   runApp(const MyApp());
@@ -18,8 +22,10 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '2ra UI',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        brightness: Brightness.dark,
+        primarySwatch: Colors.orange,
       ),
       home: const MyHomePage(title: '2ra'),
     );
@@ -36,71 +42,154 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int result = 0;
+  bool _isConnected = false;
+  bool _isRxOn = false;
+  bool _isTxOn = false;
 
-  void _reloadLib() async {
-    final manifestContent = await rootBundle.loadString('AssetManifest.json');
-    print(SysInfo.kernelArchitecture);
+  Client? _client;
 
-    final Map<String, dynamic> manifestMap = json.decode(manifestContent);
+  List<Log> logs = [];
 
-    manifestMap.forEach((key, value) {print("${key}:${value}");});
-    final DynamicLibrary nativeAddLib = DynamicLibrary.open(
-        'lib2raproto.so');
-    
-    final int Function() nativeAdd = nativeAddLib
-        .lookup<NativeFunction<Int32 Function()>>('lib2ra_start_test_server')
-        .asFunction();
-    setState(() {
-      result = nativeAdd();
-    });
+  _MyHomePageState() {
+    this._client = Client(
+      onConnected: () {
+        setState(() {
+          _isConnected = true;
+        });
+      },
+      onDisconnected: () {
+        setState(() {
+          _isConnected = false;
+        });
+      },
+      onLog: (log) {
+        this.logs.add(log);
+        setState(() {});
+      },
+      onRxState: (isOn) {
+        setState(() {
+          _isRxOn = true;
+        });
+      },
+      onTxState: (isOn) {
+        setState(() {
+          _isTxOn = true;
+        });
+      },
+    );
+
+    _init();
   }
+
+
+  TextEditingController _controller = TextEditingController(text: "");
+  _init() async {
+    final prefs = await SharedPreferences.getInstance();
+    final _config = await prefs.getString("config") ?? "";
+    _controller.text = _config;
+  }
+
+
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: Padding(
+        padding: const EdgeInsets.all(8.0),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.max,
           children: <Widget>[
-            Text(
-              'result: ${result}. Hello from lib2ra!',
+            Container(
+              height: 30,
             ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: const [
+                Text("TX"),
+                Text("RX"),
+              ],
+            ),
+            Container(
+              height: 10,
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                ChannelStateIndicator(_isTxOn ? Colors.green : Colors.red),
+                ChannelStateIndicator(_isRxOn ? Colors.green : Colors.red),
+              ],
+            ),
+                Container(
+              height: 10,
+            ),
+            TextFormField(
+              minLines: 10,
+              keyboardType: TextInputType.multiline,
+              maxLines: 20,
+              controller: _controller,
+              onChanged: (value) async {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString("config", value);
+              },
+            ),
+            Container(
+              height: 10,
+            ),
+            Expanded(
+              child: ListView.builder(
+                  itemCount: this.logs.length,
+                  itemBuilder: ((context, index) {
+                    return buildLogItem(this.logs[index]);
+                  })),
+            )
           ],
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _reloadLib,
-        tooltip: 'Reload library',
-        child: const Icon(Icons.refresh),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+        onPressed: () {
+          if (_isConnected) {
+            this._client?.shutdown();
+          } else {
+            this._client?.setConfig(_controller.text);
+            this._client?.connect();
+          }
+        },
+        tooltip: _isConnected ? 'Disconnect' : 'Connect',
+        backgroundColor: _isConnected ? Colors.green : Colors.grey,
+        child: const Icon(Icons.wifi_off),
+      ),
+    );
+  }
+
+  Widget buildLogItem(Log log) {
+    return Padding(
+      padding: const EdgeInsets.all(2.0),
+      child: Row(
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.blue,
+              borderRadius: BorderRadius.circular(3),
+            ),
+            padding: EdgeInsets.all(3),
+            child: Text(log.level ?? "?"),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 8.0),
+            child: Text(log.message ?? "-"),
+          )
+        ],
+      ),
+    );
+  }
+
+  Container ChannelStateIndicator(Color color) {
+    return Container(
+      height: 20,
+      width: 20,
+      decoration:
+          BoxDecoration(borderRadius: BorderRadius.circular(2), color: color),
     );
   }
 }
