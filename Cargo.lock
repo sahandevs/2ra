@@ -27,6 +27,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "allo-isolate"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccb993621e6bf1b67591005b0adad126159a0ab31af379743906158aed5330d0"
+dependencies = [
+ "atomic",
+]
+
+[[package]]
 name = "async-bincode"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -50,6 +59,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "atomic"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b88d82667eca772c4aa12f0f1348b3ae643424c8876448f3f7bd5787032e234c"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -304,11 +322,13 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 name = "lib2ra"
 version = "0.1.0"
 dependencies = [
+ "allo-isolate",
  "async-bincode",
  "bincode",
  "chashmap",
  "color-eyre",
  "futures-util",
+ "lazy_static",
  "log",
  "pretty_env_logger",
  "rustls",

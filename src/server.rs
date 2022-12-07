@@ -9,9 +9,10 @@ use tokio::sync::mpsc::{channel, Sender};
 use tokio_rustls::server::TlsStream;
 
 use crate::config::ServerConfig;
+use crate::instance::Instance;
 use crate::message::{ClientMessage, IntoMessage, ServerMessage};
 
-pub async fn start_server(config: ServerConfig) -> Result<()> {
+pub async fn start_server(instance: &Arc<Instance>, config: ServerConfig) -> Result<()> {
     // Build TLS configuration.
     let tls_cfg = {
         // Load public certificate.
@@ -29,12 +30,13 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
         sync::Arc::new(cfg)
     };
 
-    start_tcp_listener(config, tls_cfg).await?;
+    start_tcp_listener(instance, config, tls_cfg).await?;
 
     Ok(())
 }
 
 pub async fn start_tcp_listener(
+    instance: &Arc<Instance>,
     config: ServerConfig,
     cfg: Arc<rustls::ServerConfig>,
 ) -> Result<()> {
@@ -42,8 +44,16 @@ pub async fn start_tcp_listener(
     let server = Arc::new(Server {
         send_to_client: Default::default(),
         config,
+        instance: instance.clone(),
     });
-    while let Ok((conn, _)) = server_listener.accept().await {
+
+    while let Ok((conn, _)) = tokio::select! {
+        _ = instance.shutdown_signal.notified() => {
+            log::info!("shutting down server tcp listener...");
+            return Ok(());
+        },
+        x = server_listener.accept() => x,
+    } {
         let cfg = cfg.clone();
         let server = server.clone();
         tokio::spawn(async move {
@@ -69,6 +79,7 @@ pub async fn start_tcp_listener(
 pub struct Server {
     send_to_client: chashmap::CHashMap<String, Arc<Sender<ServerMessage>>>,
     config: ServerConfig,
+    instance: Arc<Instance>,
 }
 
 macro_rules! err {
@@ -104,7 +115,13 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
             tls_stream.write_all(m.as_message()?.as_slice()).await?;
             tls_stream.flush().await?;
 
-            while let Some(m) = rx.recv().await {
+            while let Some(m) = tokio::select! {
+                _ = server.instance.shutdown_signal.notified() => {
+                    log::info!("shutting down rx..");
+                    return Ok(());
+                },
+                x = rx.recv() => x,
+            } {
                 tls_stream.write_all(m.as_message()?.as_slice()).await?;
                 tls_stream.flush().await?;
             }
@@ -113,6 +130,7 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
             let connection_senders: chashmap::CHashMap<usize, Arc<Sender<Vec<u8>>>> =
                 Default::default();
 
+            // TODO: handle shutdown signal
             loop {
                 let Some(send_to_client_chan) = server.send_to_client.get(&uuid).map(|x| x.clone()) else { return Err(eyre!("unknown uuid {uuid}"));};
                 log::debug!("entering {uuid} tx loop");
@@ -159,6 +177,7 @@ async fn handle_new_connection_with_addr(
     connection_senders: &chashmap::CHashMap<usize, Arc<Sender<Vec<u8>>>>,
     id: usize,
 ) -> Result<()> {
+    // TODO: handle shutdown signal
     let send_to_client_chan = send_to_client_chan.clone();
     let (tx, mut rx) = channel(10000);
     connection_senders.insert(id, Arc::new(tx));

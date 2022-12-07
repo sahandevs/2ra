@@ -1,12 +1,12 @@
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: Option<ServerConfig>,
     pub client: Option<ClientConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub http_response: String,
     pub buffer_size: usize,
@@ -18,7 +18,7 @@ pub struct ServerConfig {
     pub separator: Vec<char>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ClientConfig {
     pub http_request: String,
     pub buffer_size: usize,

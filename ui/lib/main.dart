@@ -64,7 +64,12 @@ class _MyHomePageState extends State<MyHomePage> {
       },
       onLog: (log) {
         this.logs.add(log);
-        setState(() {});
+        setState(() {
+          _scrollController.animateTo(
+              _scrollController.position.maxScrollExtent,
+              duration: Duration(milliseconds: 50),
+              curve: Curves.easeInOut);
+        });
       },
       onRxState: (isOn) {
         setState(() {
@@ -81,6 +86,7 @@ class _MyHomePageState extends State<MyHomePage> {
     _init();
   }
 
+  final ScrollController _scrollController = ScrollController();
 
   TextEditingController _controller = TextEditingController(text: "");
   _init() async {
@@ -88,8 +94,6 @@ class _MyHomePageState extends State<MyHomePage> {
     final _config = await prefs.getString("config") ?? "";
     _controller.text = _config;
   }
-
-
 
   @override
   Widget build(BuildContext context) {
@@ -120,7 +124,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 ChannelStateIndicator(_isRxOn ? Colors.green : Colors.red),
               ],
             ),
-                Container(
+            Container(
               height: 10,
             ),
             TextFormField(
@@ -139,6 +143,7 @@ class _MyHomePageState extends State<MyHomePage> {
             Expanded(
               child: ListView.builder(
                   itemCount: this.logs.length,
+                  controller: _scrollController,
                   itemBuilder: ((context, index) {
                     return buildLogItem(this.logs[index]);
                   })),
@@ -157,7 +162,7 @@ class _MyHomePageState extends State<MyHomePage> {
         },
         tooltip: _isConnected ? 'Disconnect' : 'Connect',
         backgroundColor: _isConnected ? Colors.green : Colors.grey,
-        child: const Icon(Icons.wifi_off),
+        child: Icon(_isConnected ? Icons.wifi : Icons.wifi_off),
       ),
     );
   }
@@ -169,7 +174,13 @@ class _MyHomePageState extends State<MyHomePage> {
         children: [
           Container(
             decoration: BoxDecoration(
-              color: Colors.blue,
+              color: {
+                    "ERROR": Colors.red,
+                    "DEBUG": Colors.purple,
+                    "INFO": Colors.blue,
+                    "WARNING": Colors.yellowAccent
+                  }[log.level ?? ""] ??
+                  Colors.blue,
               borderRadius: BorderRadius.circular(3),
             ),
             padding: EdgeInsets.all(3),

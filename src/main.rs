@@ -2,12 +2,10 @@ use std::env::args;
 
 use tokio::fs::read_to_string;
 
-
-mod start;
-
 pub mod client;
 pub mod config;
 pub mod gate;
+pub mod instance;
 pub mod message;
 pub mod server;
 
@@ -30,6 +28,6 @@ async fn main() {
     };
     let config = read_to_string(config).await.unwrap();
     let config: config::Config = toml::de::from_str(&config).unwrap();
-    
-    start::start(config).await;
+
+    instance::Instance::new(config).unwrap().start().await;
 }

@@ -25,10 +25,11 @@ use tokio_rustls::{client::TlsStream, TlsConnector};
 use crate::{
     config::ClientConfig,
     gate::Gate,
+    instance::Instance,
     message::{ClientMessage, IntoMessage, ServerMessage},
 };
 
-pub async fn start_client(config: ClientConfig) -> Result<()> {
+pub async fn start_client(instance: &Arc<Instance>, config: ClientConfig) -> Result<()> {
     let config = Arc::new(config);
 
     log::info!("creating socks5 server ...");
@@ -36,10 +37,17 @@ pub async fn start_client(config: ClientConfig) -> Result<()> {
     log::info!("creating socks5 server done");
     log::info!("creating 2ra client ...");
 
-    let pool = vec![Arc::new(Client::new(config.clone()).await?); config.client_pool];
+    let pool =
+        vec![Arc::new(Client::new(config.clone(), instance.clone()).await?); config.client_pool];
     let mut next_client_idx = 0;
 
-    while let Ok((conn, _)) = server.accept().await {
+    while let Ok((conn, _)) = tokio::select! {
+        _ = instance.shutdown_signal.notified() => {
+            log::info!("shutting down client...");
+            return Ok(());
+        },
+        x = server.accept() => x,
+    } {
         let client = pool[next_client_idx].clone();
         next_client_idx += 1;
         if next_client_idx >= pool.len() {
@@ -67,6 +75,8 @@ struct Client {
     killing: AtomicBool,
 
     gate: Gate,
+
+    instance: Arc<Instance>,
 }
 
 unsafe impl Sync for Client {}
@@ -125,7 +135,7 @@ impl Client {
         Ok(stream)
     }
 
-    pub async fn new(config: Arc<ClientConfig>) -> Result<Client> {
+    pub async fn new(config: Arc<ClientConfig>, instance: Arc<Instance>) -> Result<Client> {
         // stub tx channel
         let (tx, _) = channel(10000);
         Ok(Client {
@@ -136,6 +146,7 @@ impl Client {
             gate: Gate::new(true),
             kill_notification: Default::default(),
             killing: AtomicBool::new(true),
+            instance,
         })
     }
 
@@ -276,6 +287,19 @@ impl Client {
             }
         });
         log::info!("tx_stream created");
+
+        let inst = self.instance.clone();
+        let self_ref = self.clone();
+        tokio::spawn(async move {
+            inst.shutdown_signal.notified().await;
+            self_ref.gate.set_open(false);
+            self_ref
+                .kill_notification
+                .read()
+                .await
+                .clone()
+                .notify_waiters();
+        });
 
         *tx_ref = Arc::new(tx);
 

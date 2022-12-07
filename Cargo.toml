@@ -23,6 +23,8 @@ toml = "*"
 uuid = { version = "*", features = ["v4"] }
 pretty_env_logger = "*"
 log = "*"
+lazy_static = "*"
+allo-isolate = "*"
 
 [lib]
 name         = "2raproto"
