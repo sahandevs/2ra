@@ -1,4 +1,4 @@
-package com.example.ui
+package com.freedom.proto2ra
 
 import io.flutter.embedding.android.FlutterActivity
 

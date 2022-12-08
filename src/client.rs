@@ -257,6 +257,7 @@ impl Client {
             stream.flush().await?;
             stream
         };
+        log::info!("tx_stream created");
 
         let (tx, mut chan_rx) = mpsc::channel::<Vec<u8>>(10000);
 

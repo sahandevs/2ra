@@ -11,7 +11,7 @@ class Log {
 }
 
 final DynamicLibrary lib2ra =
-    DynamicLibrary.open('../target/release/lib2raproto.so');
+    DynamicLibrary.open('lib2raproto.so');
 
 final Pointer<Utf8> Function() lib2raVersion = lib2ra
     .lookup<NativeFunction<Pointer<Utf8> Function()>>('lib2ra_version')
@@ -30,6 +30,12 @@ final Pointer<Int> Function(Pointer<Utf8> config) lib2raNewInstance = lib2ra
 final void Function(Pointer<Int> instance) lib2raStopInstance = lib2ra
     .lookup<NativeFunction<Void Function(Pointer<Int>)>>('lib2ra_stop_instance')
     .asFunction();
+
+enum ChanState {
+  connected,
+  disconnected,
+  connecting,
+}
 
 final void Function(
         Pointer<NativeFunction<Int8 Function(Int64, Pointer<Dart_CObject>)>>,
@@ -69,6 +75,26 @@ class Client {
       List<dynamic> parts = message;
       final log = Log(level: parts[0], message: parts[1]);
       if (log.message?.isNotEmpty ?? false) {
+        if (log.message!.contains("creating rx_stream")) {
+          this.onRxState!(ChanState.connecting);
+        }
+        if (log.message!.contains("rx_stream created")) {
+          this.onRxState!(ChanState.connected);
+        }
+        if (log.message!.contains("killing rx_stream")) {
+          this.onRxState!(ChanState.disconnected);
+        }
+
+        if (log.message!.contains("creating tx_stream")) {
+          this.onTxState!(ChanState.connecting);
+        }
+        if (log.message!.contains("killing tx_stream")) {
+          this.onTxState!(ChanState.disconnected);
+        }
+        if (log.message!.contains("tx_stream created")) {
+          this.onTxState!(ChanState.connected);
+        }
+
         this.onLog!(log);
       }
     }));
@@ -78,8 +104,8 @@ class Client {
   void Function()? onConnected;
   void Function()? onDisconnected;
 
-  void Function(bool on)? onRxState;
-  void Function(bool on)? onTxState;
+  void Function(ChanState state)? onRxState;
+  void Function(ChanState state)? onTxState;
 
   String _config = "";
 

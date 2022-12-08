@@ -43,8 +43,8 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   bool _isConnected = false;
-  bool _isRxOn = false;
-  bool _isTxOn = false;
+  ChanState _RxState = ChanState.disconnected;
+  ChanState _TxState = ChanState.disconnected;
 
   Client? _client;
 
@@ -71,14 +71,14 @@ class _MyHomePageState extends State<MyHomePage> {
               curve: Curves.easeInOut);
         });
       },
-      onRxState: (isOn) {
+      onRxState: (state) {
         setState(() {
-          _isRxOn = true;
+          _RxState = state;
         });
       },
-      onTxState: (isOn) {
+      onTxState: (state) {
         setState(() {
-          _isTxOn = true;
+          _TxState = state;
         });
       },
     );
@@ -120,8 +120,8 @@ class _MyHomePageState extends State<MyHomePage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                ChannelStateIndicator(_isTxOn ? Colors.green : Colors.red),
-                ChannelStateIndicator(_isRxOn ? Colors.green : Colors.red),
+                ChannelStateIndicator(_TxState),
+                ChannelStateIndicator(_RxState),
               ],
             ),
             Container(
@@ -195,12 +195,17 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  Container ChannelStateIndicator(Color color) {
+  Container ChannelStateIndicator(ChanState state) {
     return Container(
       height: 20,
       width: 20,
-      decoration:
-          BoxDecoration(borderRadius: BorderRadius.circular(2), color: color),
+      decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(2),
+          color: state == ChanState.disconnected
+              ? Colors.red
+              : state == ChanState.connected
+                  ? Colors.green
+                  : Colors.yellowAccent),
     );
   }
 }

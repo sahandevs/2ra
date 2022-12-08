@@ -14,12 +14,12 @@ pub mod message;
 pub mod server;
 
 #[no_mangle]
-pub extern "C" fn lib2ra_version() -> *const i8 {
+pub extern "C" fn lib2ra_version() -> *const u8 {
     lazy_static::lazy_static! {
         static ref VERSION: CString = CString::new(env!("CARGO_PKG_VERSION")).unwrap();
     }
 
-    VERSION.as_ptr()
+    VERSION.as_ptr() as _
 }
 
 #[no_mangle]
@@ -38,7 +38,7 @@ pub extern "C" fn lib2ra_set_dart_send_port(
             }
             return Ok(());
         })
-        .parse_filters("DEBUG")
+        .parse_filters("INFO")
         .try_init()
         .unwrap();
     log::debug!("logger set!");
