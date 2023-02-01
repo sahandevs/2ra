@@ -425,7 +425,7 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
             let conn = connect
                 .reply(Reply::Succeeded, Address::unspecified())
                 .await?;
-            let (mut socks_read, mut socks_write) = conn.stream.into_split();
+            let (mut socks_read, mut socks_write) = conn.into_split();
             let broken_pipe = Arc::new(AtomicBool::new(false));
 
             let bp = broken_pipe.clone();

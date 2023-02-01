@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 socks5-proto = "0.3.3"
-socks5-server = "0.8.3"
+socks5-server = { git = "https://github.com/sahandevs/socks5-server", branch = "add-into-split-in-Connect-Ready" }
 rustls =  { version = "0.20.7", features = ["dangerous_configuration"] }
 tokio = { version = "1.20.2", features = ["full"] }
 color-eyre = "0.6"
@@ -25,11 +25,6 @@ pretty_env_logger = "*"
 log = "*"
 lazy_static = "*"
 allo-isolate = "*"
-
-[package.metadata.patch.socks5-server]
-patches = [
-    "patches/0001-socks5-make-stream-public.patch"
-]
 
 [lib]
 name         = "2raproto"

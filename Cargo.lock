@@ -738,9 +738,8 @@ dependencies = [
 
 [[package]]
 name = "socks5-server"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd7260a3af0411620eca9c63032069ec9f0d92ef4214e017672c864f573d6a21"
+version = "0.8.4"
+source = "git+https://github.com/sahandevs/socks5-server?branch=add-into-split-in-Connect-Ready#4c18f5124d981c20eabc074e0e916b79fa1e006e"
 dependencies = [
  "async-trait",
  "bytes",
