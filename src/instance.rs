@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 
 use color_eyre::Result;
 
@@ -24,6 +27,14 @@ pub struct Instance {
     pub config: config::Config,
 
     pub shutdown_signal: tokio::sync::Notify,
+
+    pub stats: Stats,
+}
+
+#[derive(Default)]
+pub struct Stats {
+    pub client_handled_tcp_conn: AtomicUsize,
+    pub server_handled_tcp_conn: AtomicUsize,
 }
 
 impl Instance {
@@ -31,8 +42,11 @@ impl Instance {
         Ok(Arc::new(Self {
             config,
             shutdown_signal: Default::default(),
+            stats: Default::default(),
         }))
     }
+
+    pub fn stop(self: Arc<Self>) {}
 
     pub async fn start(self: Arc<Self>) {
         let mut config = self.config.clone();
@@ -56,10 +70,10 @@ impl Instance {
             client_config.http_request = client_config.http_request.trim().to_string();
             client_config.http_request.push_str("\r\n\r\n");
             let self_ref = self.clone();
-            let task =
-                tokio::task::spawn(
-                    async move { err!(start_client(&self_ref, client_config).await) },
-                );
+            let task = tokio::task::spawn(async move {
+                err!(start_client(&self_ref, client_config).await);
+                println!("after client");
+            });
 
             tasks.push(task);
         }

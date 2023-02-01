@@ -1,7 +1,7 @@
 use std::{
     mem::size_of,
     sync::{
-        atomic::{AtomicBool, AtomicUsize},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Release},
         Arc,
     },
     time::Duration,
@@ -408,19 +408,24 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
 
     log::debug!("new socks5 conn");
     match conn.handshake().await? {
-        Connection::Associate(associate, _) => {
-            let mut conn = associate
-                .reply(Reply::CommandNotSupported, Address::unspecified())
-                .await?;
+        Connection::Associate(associate, addr) => {
+            let mut conn = associate.reply(Reply::Succeeded, addr).await?;
+
             conn.shutdown().await?;
         }
         Connection::Bind(bind, _) => {
+            log::error!("socks5 bind is not supported!");
             let mut conn = bind
                 .reply(Reply::CommandNotSupported, Address::unspecified())
                 .await?;
             conn.shutdown().await?;
         }
         Connection::Connect(connect, addr) => {
+            client
+                .instance
+                .stats
+                .client_handled_tcp_conn
+                .fetch_add(1, Release);
             let (mut proxy_server_stream, id) = client.create_new_connection(addr).await?;
             let conn = connect
                 .reply(Reply::Succeeded, Address::unspecified())

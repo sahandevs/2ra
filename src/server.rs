@@ -1,5 +1,6 @@
 use color_eyre::{eyre::eyre, Result};
 use std::mem::size_of;
+use std::sync::atomic::Ordering::Release;
 use std::sync::Arc;
 use std::vec::Vec;
 use std::{fs, io, sync};
@@ -139,6 +140,11 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                 match msg {
                     ClientMessage::NewConnectionWithDomain { domain, port, id } => {
                         log::debug!("got a message in tx channel NewConnectionWithDomain");
+                        server
+                            .instance
+                            .stats
+                            .server_handled_tcp_conn
+                            .fetch_add(1, Release);
                         handle_new_connection_with_addr(
                             ClientMessage::NewConnectionWithDomain { domain, port, id },
                             send_to_client_chan,
@@ -149,6 +155,11 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                     }
                     ClientMessage::NewConnectionWithIp { addr, id } => {
                         log::debug!("got a message in tx channel {:?}", msg);
+                        server
+                            .instance
+                            .stats
+                            .server_handled_tcp_conn
+                            .fetch_add(1, Release);
                         handle_new_connection_with_addr(
                             ClientMessage::NewConnectionWithIp { addr, id },
                             send_to_client_chan,
