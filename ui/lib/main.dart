@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:system_info2/system_info2.dart';
+import 'package:flutter_background/flutter_background.dart';
 
 import 'bridge.dart'; // For Platform.isX
 
@@ -52,15 +53,17 @@ class _MyHomePageState extends State<MyHomePage> {
 
   _MyHomePageState() {
     this._client = Client(
-      onConnected: () {
+      onConnected: () async {
         setState(() {
           _isConnected = true;
         });
+        await FlutterBackground.enableBackgroundExecution();
       },
-      onDisconnected: () {
+      onDisconnected: () async {
         setState(() {
           _isConnected = false;
         });
+        await FlutterBackground.disableBackgroundExecution();
       },
       onLog: (log) {
         this.logs.add(log);
@@ -93,6 +96,15 @@ class _MyHomePageState extends State<MyHomePage> {
     final prefs = await SharedPreferences.getInstance();
     final _config = await prefs.getString("config") ?? "";
     _controller.text = _config;
+
+    final androidConfig = FlutterBackgroundAndroidConfig(
+      notificationTitle: "2ra UI",
+      notificationText: "2ra is connected!",
+      notificationImportance: AndroidNotificationImportance.Default,
+      enableWifiLock: true,
+    );
+    bool success =
+        await FlutterBackground.initialize(androidConfig: androidConfig);
   }
 
   @override
