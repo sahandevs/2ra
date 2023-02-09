@@ -10,6 +10,14 @@ pub enum ClientMessage {
     InitTx {
         uuid: String,
     },
+    NewUdpSocket {
+        id: usize,
+    },
+    DataUdp {
+        id: usize,
+        addr: SocketAddr,
+        data: Vec<u8>,
+    },
     NewConnectionWithIp {
         addr: SocketAddr,
         id: usize,
@@ -31,9 +39,21 @@ pub enum ClientMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerMessage {
-    SessionCreated { uuid: String },
-    Data { id: usize, data: Vec<u8> },
-    ConnectionClosed { id: usize },
+    SessionCreated {
+        uuid: String,
+    },
+    Data {
+        id: usize,
+        data: Vec<u8>,
+    },
+    DataUdp {
+        id: usize,
+        data: Vec<u8>,
+        addr: SocketAddr,
+    },
+    ConnectionClosed {
+        id: usize,
+    },
     Heartbeat,
 }
 

@@ -25,11 +25,11 @@ pretty_env_logger = "*"
 log = "*"
 lazy_static = "*"
 allo-isolate = "*"
+portpicker="0.1.1"
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["socks"]}
 httpmock = "0.6"
-portpicker="0.1.1"
 fast-socks5="0.8.1"
 
 [[bin]]

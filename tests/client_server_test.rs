@@ -1,6 +1,8 @@
 use fast_socks5::client::Config;
 use httpmock::prelude::*;
 use std::{
+    net::SocketAddrV4,
+    str::FromStr,
     sync::{atomic::Ordering::Acquire, Arc, Mutex},
     time::Duration,
 };
@@ -19,11 +21,12 @@ tx_sni = "tx.com"
 rx_sni = "rx.com"
 insecure_tls = true
 # socks5 addr
-inbound_addr = "127.0.0.1:8989"
+inbound_addr = "127.0.0.16:8989"
 # 2ra server addr
 outbound_addr = "127.0.0.1:9999"
 separator = ["\r", "\n", "\r", "\n"]
-client_pool = 5
+client_pool = 1
+udp_bind_addr = "127.0.0.16:0"
 
 [server]
 http_response = """
@@ -36,6 +39,7 @@ inbound_addr = "127.0.0.1:9999"
 cert_pem_path = "./cert/cert.pem"
 key_pem_path = "./cert/key.pem"
 separator = ["\r", "\n", "\r", "\n"]
+udp_bind_addr = "127.0.0.16:0"
 "#;
 
 #[allow(dead_code)]
@@ -53,9 +57,11 @@ async fn create_udp_upstream() -> String {
     let addr = format!("127.0.0.16:{}", port);
     let socket = tokio::net::UdpSocket::bind(&addr).await.unwrap();
     tokio::spawn(async move {
-        let mut buff = [0u8; 1024];
+        let mut buff = [0u8; 0x10000];
         while let Ok((n, addr)) = socket.recv_from(&mut buff).await {
-            let _ = &buff[..n];
+            let x = &buff[..n];
+
+            log::debug!("##### {:?}", std::str::from_utf8(x));
             socket.send_to(b"hi!", addr).await.unwrap();
         }
     });
@@ -72,8 +78,8 @@ async fn setup_environment() -> Arc<Env> {
     if let Some(env) = &*env_ref {
         return env.clone();
     }
-    // let _ = color_eyre::install();
-    // pretty_env_logger::init();
+    let _ = color_eyre::install();
+    pretty_env_logger::init();
     let config: lib2ra::config::Config = toml::from_str(CONFIG).unwrap();
     let instance = lib2ra::instance::Instance::new(config.clone()).unwrap();
 
@@ -180,4 +186,24 @@ Host: fronted-domain.com
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_simple_udp() {
+    let env = setup_environment().await;
+    let mut backing_stream = tokio::net::TcpStream::connect(&env.socks5_addr)
+        .await
+        .unwrap();
+
+    let socks = fast_socks5::client::Socks5Datagram::bind(&mut backing_stream, "[::]:0")
+        .await
+        .unwrap();
+    let upstream = SocketAddrV4::from_str(env.udp_upstream_addr.as_str()).unwrap();
+
+    socks.send_to(b"test", upstream.clone()).await.unwrap();
+
+    let mut buff = [0u8; 1024];
+    let (n, addr) = socks.recv_from(&mut buff).await.unwrap();
+    assert_eq!(addr.to_string(), upstream.to_string());
+    assert_eq!(&buff[..n], b"hi!");
 }

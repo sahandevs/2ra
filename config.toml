@@ -14,6 +14,7 @@ inbound_addr = "127.0.0.1:5123"
 # 2ra server addr
 outbound_addr = "127.0.0.1:443"
 separator = ["\r", "\n", "\r", "\n"]
+udp_bind_addr = "127.0.0.16:0"
 
 [server-disable]
 http_response = """
@@ -26,3 +27,4 @@ inbound_addr = "127.0.0.1:4433"
 cert_pem_path = "./cert/cert.pem"
 key_pem_path = "./cert/key.pem"
 separator = ["\r", "\n", "\r", "\n"]
+udp_bind_addr = "127.0.0.17:0"

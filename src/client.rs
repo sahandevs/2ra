@@ -1,5 +1,6 @@
 use std::{
     mem::size_of,
+    net::{SocketAddr, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering::Release},
         Arc,
@@ -10,7 +11,7 @@ use std::{
 use color_eyre::{eyre::eyre, Result};
 use rustls::{client::ServerCertVerifier, OwnedTrustAnchor};
 use socks5_proto::{Address, Reply};
-use socks5_server::{auth::NoAuth, Connection, IncomingConnection, Server};
+use socks5_server::{auth::NoAuth, AssociatedUdpSocket, Connection, IncomingConnection, Server};
 use tokio::{
     self,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -70,6 +71,8 @@ struct Client {
     next_conn_id: AtomicUsize,
 
     receiver_channels: RwLock<Arc<chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
+    receiver_channels_udp:
+        RwLock<Arc<chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<(SocketAddr, Vec<u8>)>>>>,
 
     kill_notification: RwLock<Arc<tokio::sync::Notify>>,
     killing: AtomicBool,
@@ -142,6 +145,7 @@ impl Client {
             tx: RwLock::new(Arc::new(tx)),
             next_conn_id: Default::default(),
             receiver_channels: Default::default(),
+            receiver_channels_udp: Default::default(),
             config,
             gate: Gate::new(true),
             kill_notification: Default::default(),
@@ -166,8 +170,14 @@ impl Client {
             Default::default();
         let receiver_channels_ref = receiver_channels.clone();
 
+        let receiver_channels_udp: Arc<
+            chashmap::CHashMap<usize, tokio::sync::mpsc::Sender<(SocketAddr, Vec<u8>)>>,
+        > = Default::default();
+        let receiver_channels_udp_ref = receiver_channels_udp.clone();
+
         let mut tx_ref = self.tx.write().await;
         let mut receiver_channels_mut_ref = self.receiver_channels.write().await;
+        let mut receiver_channels_udp_mut_ref = self.receiver_channels_udp.write().await;
         let mut old_kill_notification_ref = self.kill_notification.write().await;
 
         log::info!("creating rx_stream");
@@ -230,6 +240,21 @@ impl Client {
                                 return;
                             }
                             if let Err(e) = chan.send(data).await {
+                                log::error!("x -> {}", e);
+                            }
+                        } else {
+                            log::error!("no channel listening for {}", id);
+                        }
+                    }
+                    ServerMessage::DataUdp { id, data, addr } => {
+                        if let Some(chan) = receiver_channels_udp.get(&id) {
+                            if client_ref
+                                .killing
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                return;
+                            }
+                            if let Err(e) = chan.send((addr, data)).await {
                                 log::error!("x -> {}", e);
                             }
                         } else {
@@ -304,10 +329,12 @@ impl Client {
 
         *tx_ref = Arc::new(tx);
 
+        *receiver_channels_udp_mut_ref = receiver_channels_udp_ref;
         *receiver_channels_mut_ref = receiver_channels_ref;
         *old_kill_notification_ref = new_kill_notification;
         drop(tx_ref);
         drop(receiver_channels_mut_ref);
+        drop(receiver_channels_udp_mut_ref);
 
         Ok(())
     }
@@ -348,8 +375,40 @@ impl Client {
         Ok((rx, id))
     }
 
+    pub async fn create_new_udp(
+        &self,
+    ) -> Result<(tokio::sync::mpsc::Receiver<(SocketAddr, Vec<u8>)>, usize)> {
+        let id = self
+            .next_conn_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let (tx, rx) = mpsc::channel::<(SocketAddr, Vec<u8>)>(10000);
+
+        if self
+            .receiver_channels_udp
+            .read()
+            .await
+            .insert(id, tx)
+            .is_some()
+        {
+            log::warn!("id collided!");
+        }
+
+        let msg = ClientMessage::NewUdpSocket { id };
+
+        self.tx.read().await.send(msg.as_message()?).await?;
+        Ok((rx, id))
+    }
+
     pub async fn send_data(&self, id: usize, data: Vec<u8>) -> Result<()> {
         let msg = ClientMessage::Data { id, data };
+        let tx = self.tx.read().await;
+        tx.send(msg.as_message()?).await?;
+        Ok(())
+    }
+
+    pub async fn send_udp_data(&self, id: usize, data: Vec<u8>, addr: SocketAddr) -> Result<()> {
+        let msg = ClientMessage::DataUdp { id, data, addr };
         let tx = self.tx.read().await;
         tx.send(msg.as_message()?).await?;
         Ok(())
@@ -408,10 +467,103 @@ async fn handle(client: Arc<Client>, conn: IncomingConnection) -> Result<()> {
 
     log::debug!("new socks5 conn");
     match conn.handshake().await? {
-        Connection::Associate(associate, addr) => {
-            let mut conn = associate.reply(Reply::Succeeded, addr).await?;
+        Connection::Associate(associate, _) => {
+            let socket = tokio::net::UdpSocket::bind(&client.config.udp_bind_addr).await?;
+            let socket = Arc::new(AssociatedUdpSocket::from((socket, 0x10000)));
 
-            conn.shutdown().await?;
+            let socket_ref = socket.clone();
+            let addr = socket.local_addr()?;
+            let mut conn = associate
+                .reply(Reply::Succeeded, Address::SocketAddress(addr))
+                .await?;
+
+            log::error!("socks5 Associate is not supported! -> peer addr {}", addr);
+            // open a udp socket here
+            // route the traffic to the server
+            let broken_pipe = Arc::new(AtomicBool::new(false));
+            let (mut proxy_server_stream, id) = client.create_new_udp().await?;
+
+            let local_socket = Arc::new(tokio::sync::Mutex::new(
+                "255.255.255.255:1"
+                    .to_socket_addrs()
+                    .unwrap()
+                    .next()
+                    .unwrap(),
+            ));
+
+            let socket_addr_ref = local_socket.clone();
+
+            let client_ref = client.clone();
+            let bp = broken_pipe.clone();
+            let read_task = tokio::task::spawn(async move {
+                loop {
+                    if bp.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    match socket.recv_from().await {
+                        Ok((data, _, addr, local_addr)) => {
+                            {
+                                *socket_addr_ref.lock().await = local_addr;
+                            }
+                            match addr {
+                                Address::SocketAddress(addr) => {
+                                    if let Err(e) =
+                                        client_ref.send_udp_data(id, data.to_vec(), addr).await
+                                    {
+                                        log::error!("error while sending data to server {e}");
+                                        bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        return;
+                                    }
+                                }
+                                Address::DomainAddress(_, _) => {
+                                    log::error!("udp domain not supported");
+                                    bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("err {:?}", e);
+                            break;
+                        }
+                    };
+                }
+            });
+
+            let bp = broken_pipe.clone();
+            let write_task = tokio::task::spawn(async move {
+                while let Some((target_addr, data)) = proxy_server_stream.recv().await {
+                    if let Err(e) = socket_ref
+                        .send_to(
+                            data.as_slice(),
+                            0,
+                            Address::SocketAddress(target_addr),
+                            *local_socket.lock().await,
+                        )
+                        .await
+                    {
+                        log::error!("err?? {}", e);
+                        bp.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            });
+
+            let kill_notification = client.kill_notification.read().await.clone();
+
+            tokio::select! {
+                _ = kill_notification.notified() => {
+                    broken_pipe.store(true, std::sync::atomic::Ordering::Relaxed);
+                    conn.shutdown().await?;
+                    return Err(eyre!("kill notification received while handling socks5 connection"));
+                },
+                x = async { tokio::join!(read_task, write_task) } => {
+                    x.0?;
+                    x.1?;
+
+                    log::debug!("socks5 job done");
+                    return Ok(());
+                }
+            };
         }
         Connection::Bind(bind, _) => {
             log::error!("socks5 bind is not supported!");

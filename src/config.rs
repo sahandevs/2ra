@@ -16,6 +16,8 @@ pub struct ServerConfig {
     pub key_pem_path: String,
 
     pub separator: Vec<char>,
+
+    pub udp_bind_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,4 +36,6 @@ pub struct ClientConfig {
     pub separator: Vec<char>,
 
     pub client_pool: usize,
+
+    pub udp_bind_addr: String,
 }

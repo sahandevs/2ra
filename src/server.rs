@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::vec::Vec;
 use std::{fs, io, sync};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc::{channel, Sender};
 use tokio_rustls::server::TlsStream;
 
@@ -131,6 +131,8 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
             let connection_senders: chashmap::CHashMap<usize, Arc<Sender<Vec<u8>>>> =
                 Default::default();
 
+            let udp_sockets: chashmap::CHashMap<usize, Arc<UdpSocket>> = Default::default();
+
             // TODO: handle shutdown signal
             loop {
                 let Some(send_to_client_chan) = server.send_to_client.get(&uuid).map(|x| x.clone()) else { return Err(eyre!("unknown uuid {uuid}"));};
@@ -138,6 +140,43 @@ async fn handle(server: Arc<Server>, mut tls_stream: TlsStream<TcpStream>) -> Re
                 let msg = read_client_message(&mut tls_stream).await?;
 
                 match msg {
+                    ClientMessage::NewUdpSocket { id } => {
+                        let socket = Arc::new(
+                            tokio::net::UdpSocket::bind(&server.config.udp_bind_addr).await?,
+                        );
+                        udp_sockets.insert(id, socket.clone());
+                        tokio::spawn(async move {
+                            let mut buff = [0u8; 0x10000];
+                            loop {
+                                match socket.recv_from(buff.as_mut_slice()).await {
+                                    Ok((n, addr)) => {
+                                        if n == 0 {
+                                            log::debug!("n == 0");
+                                            break;
+                                        }
+                                        let data = buff[0..n].to_vec(); // TODO: double check
+                                        let msg = ServerMessage::DataUdp { id, data, addr };
+                                        send_to_client_chan.send(msg).await?;
+                                    }
+                                    Err(e) => {
+                                        log::error!("err {:?}", e);
+                                        break;
+                                    }
+                                };
+                            }
+
+                            Ok::<(), color_eyre::eyre::Report>(())
+                        });
+                    }
+                    ClientMessage::DataUdp { id, addr, data } => {
+                        log::debug!(
+                            "got a message in tx channel Data udp {:?} {}",
+                            std::str::from_utf8(&data),
+                            addr
+                        );
+                        let Some(socket) = udp_sockets.get(&id).map(|x| x.clone()) else { return Err(eyre!("no sender!")); };
+                        socket.send_to(data.as_slice(), addr).await?;
+                    }
                     ClientMessage::NewConnectionWithDomain { domain, port, id } => {
                         log::debug!("got a message in tx channel NewConnectionWithDomain");
                         server
